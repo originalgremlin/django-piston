@@ -1,6 +1,6 @@
 import binascii
-
 import oauth
+import uuid
 from django.http import HttpResponse, HttpResponseRedirect
 from django.contrib.auth.models import User, AnonymousUser
 from django.contrib.auth.decorators import login_required
@@ -9,6 +9,7 @@ from django.contrib.auth import authenticate
 from django.conf import settings
 from django.core.urlresolvers import get_callable
 from django.core.exceptions import ImproperlyConfigured
+from django.core.cache import cache
 from django.shortcuts import render_to_response
 from django.template import RequestContext
 from django.utils.http import urlquote
@@ -325,20 +326,14 @@ class DjangoAuthentication(object):
     Django authentication for piston. 
     """
     def __init__(self, login_url=None, redirect_field_name=REDIRECT_FIELD_NAME):
-        if not login_url:
-            login_url = settings.LOGIN_URL
-        self.login_url = login_url
+        self.login_url = login_url or getattr(settings, 'LOGIN_URL')
         self.redirect_field_name = redirect_field_name
         self.request = None
     
     def is_authenticated(self, request):
         """
-        This method call the 'is_authenticated' method of django
+        This method calls the 'is_authenticated' method of django
         User in django.contrib.auth.models.
-        
-        'is_authenticated': Will be called when checking for
-        authentication. It returns True if the user is authenticated
-        False otherwise.
         """
         self.request = request
         return request.user.is_authenticated()
@@ -361,27 +356,49 @@ class PasswordAuthentication(object):
     Please don't use this except over https. 
     Even then it may be a bad idea.
     """
+    def __init__(self, timeout=None):
+        self.is_expired = False
+        self.cache_timeout = timeout or getattr(settings, 'PISTON_PASSWORD_AUTH_TIMEOUT', 900)
+    
     def is_authenticated(self, request):
         """
-        This method checks the request headers for a valid username and password.
+        This method checks the request headers for a valid username and password or a unique token.
+        It will first attempt to use the unique temporary token to authenticate.
+        Then, if both a username and password are provided it will use those to authenticate.
         
-        'is_authenticated': Will be called when checking for
-        authentication. It returns True if the user is authenticated
-        False otherwise.
+        If both of these methods fail it will return false.
+        
+        Headers: HTTP_AUTH_USERNAME, HTTP_AUTH_PASSWORD, HTTP_AUTH_TOKEN
         """
+        # first try auth token
+        token = request.META.get('HTTP_AUTH_TOKEN')
+        if token:
+            request.user = cache.get('password_auth_token_{0:s}'.format(token))
+            if request.user:
+                request.auth_token = token
+                return True
+            else:
+                self.is_expired = True
+                return False
+        # then try username/password
         username = request.META.get('HTTP_AUTH_USERNAME')
         password = request.META.get('HTTP_AUTH_PASSWORD')
-        request.user = authenticate(username=username, password=password)
-        return request.user is not None
+        if username and password:
+            request.user = authenticate(username=username, password=password)
+            if request.user:
+                request.auth_token = uuid.uuid4().hex
+                cache.set('password_auth_token_{0:s}'.format(request.auth_token), request.user, self.cache_timeout)
+                return True
+            else:
+                return False
+        # they're not giving us anything to work with
+        return False
         
     def challenge(self):
-        """
-        'challenge': In cases where 'is_authenticated' returns
-        False, the result of this method will be returned.
-        This will usually be a 'HttpResponse' object with
-        some kind of challenge headers and 401 code on it.
-        """
-        resp = HttpResponse('Invalid username or password.')
+        if self.is_expired:
+            resp = HttpResponse('Auth token expired.')
+        else:
+            resp = HttpResponse('Invalid username or password.')
         resp.status_code = 401
         return resp
 
@@ -390,31 +407,79 @@ class SecretKeyAuthentication(object):
     """
     Public/private key authentication for piston. 
     """
+    def __init__(self, timeout=None):
+        self.is_expired = False
+        self.cache_timeout = timeout or getattr(settings, 'PISTON_SECRET_KEY_AUTH_TIMEOUT', 900)
+    
     def is_authenticated(self, request):
         """
-        This method checks the request headers for a valid key and secret key.
-        It uses the key and secret from the piston.models.Consumer model.
+        This method checks the request headers for a valid key and secret key or a unique token.
+        It will first attempt to use the unique temporary token to authenticate.
+        Then, if both keys are provided it will use those to authenticate
+        (using the key and secret from piston.models.Consumer).
+
+        If both of these methods fail it will return false.
         
-        'is_authenticated': Will be called when checking for
-        authentication. It returns True if the user is authenticated
-        False otherwise.
+        Headers: HTTP_AUTH_ACCESS_KEY, HTTP_AUTH_SECRET_KEY, HTTP_AUTH_TOKEN
         """
+        # first try auth token
+        token = request.META.get('HTTP_AUTH_TOKEN')
+        if token:
+            request.user = cache.get('secret_key_auth_token_{0:s}'.format(token))
+            if request.user:
+                request.auth_token = token
+                return True
+            else:
+                self.is_expired = True
+                return False
+        # then try secret keys
         key = request.META.get('HTTP_AUTH_ACCESS_KEY')
         secret = request.META.get('HTTP_AUTH_SECRET_KEY')
+        if key and secret:
+            try:
+                consumer = Consumer.objects.get(key=key, secret=secret)
+                request.user = consumer.user
+            except Consumer.DoesNotExist:
+                request.user = None
+            if request.user:
+                request.auth_token = uuid.uuid4().hex
+                cache.set('secret_key_auth_token_{0:s}'.format(request.auth_token), request.user, self.cache_timeout)
+                return True
+            else:
+                return False
+        # they're not giving us anything to work with
+        return False
+        
+    def challenge(self):
+        if self.is_expired:
+            resp = HttpResponse('Auth token expired.')
+        else:
+            resp = HttpResponse('Invalid key or secret key.')
+        resp.status_code = 401
+        return resp
+    
+
+class PublicKeyAuthentication(object):
+    """
+    Authenticate using a public key passed in the headers or as a query parameter.
+    """
+    def is_authenticated(self, request):
+        """
+        This method checks the request headers and query parameter for a valid public key.
+        
+        Headers: HTTP_AUTH_API_KEY
+        Query parameter: api_key
+        """
+        key = request.META.get('HTTP_AUTH_API_KEY') or request.REQUEST.get('api_key')
+        if not key:
+            return False
         try:
-            consumer = Consumer.objects.get(key=key, secret=secret)
-            request.user = consumer.user
+            request.user = Consumer.objects.get(key=key).user
             return True
         except Consumer.DoesNotExist:
             return False
         
     def challenge(self):
-        """
-        'challenge': In cases where 'is_authenticated' returns
-        False, the result of this method will be returned.
-        This will usually be a 'HttpResponse' object with
-        some kind of challenge headers and 401 code on it.
-        """
-        resp = HttpResponse('Invalid key or secret key.')
+        resp = HttpResponse('Invalid api key.')
         resp.status_code = 401
         return resp
