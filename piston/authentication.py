@@ -11,7 +11,8 @@ from django.core.urlresolvers import get_callable
 from django.core.exceptions import ImproperlyConfigured
 from django.shortcuts import render_to_response
 from django.template import RequestContext
-
+from django.utils.http import urlquote
+from django.contrib.auth import REDIRECT_FIELD_NAME
 from piston import forms
 
 class NoAuthentication(object):
@@ -315,3 +316,39 @@ class OAuthAuthentication(object):
         oauth_server, oauth_request = initialize_server_request(request)
         return oauth_server.verify_request(oauth_request)
 
+
+# http://yml-blog.blogspot.com/2009/10/django-piston-authentication-against.html
+# https://bitbucket.org/yml/django-piston/src/dfb826a31ca8/piston/authentication.py
+class DjangoAuthentication(object):
+    """
+    Django authentication for piston. 
+    """
+    def __init__(self, login_url=None, redirect_field_name=REDIRECT_FIELD_NAME):
+        if not login_url:
+            login_url = settings.LOGIN_URL
+        self.login_url = login_url
+        self.redirect_field_name = redirect_field_name
+        self.request = None
+    
+    def is_authenticated(self, request):
+        """
+        This method call the 'is_authenticated' method of django
+        User in django.contrib.auth.models.
+        
+        'is_authenticated': Will be called when checking for
+        authentication. It returns True if the user is authenticated
+        False otherwise.
+        """
+        self.request = request
+        return request.user.is_authenticated()
+        
+    def challenge(self):
+        """
+        'challenge': In cases where 'is_authenticated' returns
+        False, the result of this method will be returned.
+        This will usually be a 'HttpResponse' object with
+        some kind of challenge headers and 401 code on it.
+        """
+        path = urlquote(self.request.get_full_path())
+        tup = self.login_url, self.redirect_field_name, path 
+        return HttpResponseRedirect('%s?%s=%s' %tup)
