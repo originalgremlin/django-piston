@@ -44,7 +44,10 @@ class Consumer(models.Model):
     user = models.ForeignKey(User, null=True, blank=True, related_name='consumers')
 
     objects = ConsumerManager()
-        
+
+    class Meta:
+        unique_together = ('key', 'secret')
+
     def __unicode__(self):
         return u"Consumer %s with key %s" % (self.name, self.key)
 

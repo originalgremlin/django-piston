@@ -14,6 +14,7 @@ from django.template import RequestContext
 from django.utils.http import urlquote
 from django.contrib.auth import REDIRECT_FIELD_NAME
 from piston import forms
+from piston.models import Consumer
 
 class NoAuthentication(object):
     """
@@ -352,3 +353,68 @@ class DjangoAuthentication(object):
         path = urlquote(self.request.get_full_path())
         tup = self.login_url, self.redirect_field_name, path 
         return HttpResponseRedirect('%s?%s=%s' %tup)
+    
+
+class PasswordAuthentication(object):
+    """
+    Username/password authentication for piston. 
+    Please don't use this except over https. 
+    Even then it may be a bad idea.
+    """
+    def is_authenticated(self, request):
+        """
+        This method checks the request headers for a valid username and password.
+        
+        'is_authenticated': Will be called when checking for
+        authentication. It returns True if the user is authenticated
+        False otherwise.
+        """
+        username = request.META.get('HTTP_AUTH_USERNAME')
+        password = request.META.get('HTTP_AUTH_PASSWORD')
+        request.user = authenticate(username=username, password=password)
+        return request.user is not None
+        
+    def challenge(self):
+        """
+        'challenge': In cases where 'is_authenticated' returns
+        False, the result of this method will be returned.
+        This will usually be a 'HttpResponse' object with
+        some kind of challenge headers and 401 code on it.
+        """
+        resp = HttpResponse('Invalid username or password.')
+        resp.status_code = 401
+        return resp
+
+
+class SecretKeyAuthentication(object):
+    """
+    Public/private key authentication for piston. 
+    """
+    def is_authenticated(self, request):
+        """
+        This method checks the request headers for a valid key and secret key.
+        It uses the key and secret from the piston.models.Consumer model.
+        
+        'is_authenticated': Will be called when checking for
+        authentication. It returns True if the user is authenticated
+        False otherwise.
+        """
+        key = request.META.get('HTTP_AUTH_ACCESS_KEY')
+        secret = request.META.get('HTTP_AUTH_SECRET_KEY')
+        try:
+            consumer = Consumer.objects.get(key=key, secret=secret)
+            request.user = consumer.user
+            return True
+        except Consumer.DoesNotExist:
+            return False
+        
+    def challenge(self):
+        """
+        'challenge': In cases where 'is_authenticated' returns
+        False, the result of this method will be returned.
+        This will usually be a 'HttpResponse' object with
+        some kind of challenge headers and 401 code on it.
+        """
+        resp = HttpResponse('Invalid key or secret key.')
+        resp.status_code = 401
+        return resp
