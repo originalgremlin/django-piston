@@ -325,17 +325,11 @@ class DjangoAuthentication(object):
     """
     Django authentication for piston. 
     """
-    def __init__(self, login_url=None, redirect_field_name=REDIRECT_FIELD_NAME):
-        self.login_url = login_url or getattr(settings, 'LOGIN_URL')
-        self.redirect_field_name = redirect_field_name
-        self.request = None
-    
     def is_authenticated(self, request):
         """
         This method calls the 'is_authenticated' method of django
         User in django.contrib.auth.models.
         """
-        self.request = request
         return request.user.is_authenticated()
         
     def challenge(self):
@@ -345,9 +339,9 @@ class DjangoAuthentication(object):
         This will usually be a 'HttpResponse' object with
         some kind of challenge headers and 401 code on it.
         """
-        path = urlquote(self.request.get_full_path())
-        tup = self.login_url, self.redirect_field_name, path 
-        return HttpResponseRedirect('%s?%s=%s' %tup)
+        resp = HttpResponse("Authorization Required")
+        resp.status_code = 401
+        return resp
     
 
 class PasswordAuthentication(object):
